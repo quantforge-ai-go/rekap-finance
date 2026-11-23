@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>ATK IBI</title>
+    <meta name="viewport" id="viewport" content="width=device-width,minimum-scale=1.0,maximum-scale=1.0,initial-scale=1.0"/>
+    <meta name="icons" content="barcode,text,number,time,date,text,text"/>
+    <meta name="NeedsLocation" content="false"/>
+    <meta charset="UTF-8"/>
+    
+    <link rel="stylesheet" type="text/css" href="../style/tecit_sto_layout.css"/>
+    <!-- %BEGIN_ADDITIONAL_STYLES% -->
+      <style>
+        .finPanel { margin:10px; padding:12px; border:2px solid #1c3f61; border-radius:12px; background:#eef3f8; font-family:sans-serif; }
+        .finHead { font-size:14px; color:#16324d; display:flex; justify-content:space-between; gap:8px; }
+        #finBody { margin:8px 0; font-size:14px; line-height:1.5; color:#1a2430; word-break:break-word; }
+        #finBody .finNama { font-size:17px; font-weight:800; }
+        #finBody .finWarn { color:#b45309; font-weight:700; }
+        #finBody .finErr { color:#d9483b; font-weight:700; }
+        #finBody .finOk { color:#1f9d5a; font-weight:700; }
+        .finBtns { display:flex; gap:6px; }
+        .finBtns button { flex:1; padding:10px 4px; border-radius:8px; border:1.5px solid #1c3f61; background:#fff; color:#16324d; font-weight:700; font-size:13px; }
+        .finAuto { display:block; margin-top:8px; font-size:12px; color:#5b6b7b; }
+      </style>
+      <!-- %END_ADDITIONAL_STYLES% -->
+    
+    <script type="text/javascript" src="../api/tecit_sto_api.js"></script>
+    <script type="text/javascript" src="../api/tecit_sto_common_api.js"></script>
+    <script type="text/javascript" src="../api/tecit_sto_form_api.js"></script>
+    <script type="text/javascript" src="../api/signature_pad.min.js"></script>
+    <script type="text/javascript" src="../api/tecit_sto_signature.js"></script>
+
+    <script type="text/javascript">
+    // ===== ANTREAN FINANCE (dari aplikasi Gudangku) =====
+    var FIN_URL = "GANTI_DENGAN_URL_EXEC";   // contoh: https://script.google.com/macros/s/XXXX/exec
+    var FIN_KEY = "GANTI_DENGAN_KUNCI";      // dari fungsi buatKunciFormFinance() di Apps Script
+    var finCurrent = null, finMarked = false, finOffset = 0, finSeq = 0, finInfo = null;
+
+    function finNorm(s) { return String(s == null ? "" : s).trim().toLowerCase(); }
+    function finConfigured() { return FIN_URL.indexOf("GANTI_") !== 0 && FIN_KEY.indexOf("GANTI_") !== 0; }
+    function finAutoOn() { try { return localStorage.getItem("finAuto") !== "0"; } catch (e) { return true; } }
+    function finSetAuto(on) { try { localStorage.setItem("finAuto", on ? "1" : "0"); } catch (e) {} }
+
+    function finJsonp(params, cb) {
+      var name = "finCb" + (++finSeq) + "_" + Date.now();
+      var done = false;
+      var script = document.createElement("script");
+      function clean() {
+        window[name] = function () {};
+        if (script.parentNode) script.parentNode.removeChild(script);
+      }
+      var timer = setTimeout(function () { if (done) return; done = true; clean(); cb(null, "server tidak menjawab"); }, 15000);
+      window[name] = function (data) { if (done) return; done = true; clearTimeout(timer); clean(); cb(data, null); };
+      script.onerror = function () { if (done) return; done = true; clearTimeout(timer); clean(); cb(null, "gagal terhubung"); };
+      var q = [];
+      for (var k in params) q.push(k + "=" + encodeURIComponent(params[k]));
+      q.push("key=" + encodeURIComponent(FIN_KEY));
+      q.push("callback=" + name);
+      script.src = FIN_URL + "?" + q.join("&");
+      document.head.appendChild(script);
+    }
+
+    function finBox(cls, text) {
+      var body = document.getElementById("finBody");
+      body.innerHTML = "";
+      var s = document.createElement("div");
+      s.className = cls || "";
+      s.textContent = text;
+      body.appendChild(s);
+    }
+    function finShowError(t) { finBox("finErr", t); }
+
+    function finAutoLoad() {
+      document.getElementById("finAutoChk").checked = finAutoOn();
+      if (!finConfigured()) { finShowError("URL / kunci antrean belum diisi di file form ini."); return; }
+      if (finAutoOn()) finLoadNext(); else finBox("", "Mode manual. Tekan Muat untuk mengambil antrean.");
+    }
+
+    function finLoadNext() {
+      if (!finConfigured()) { finShowError("URL / kunci antrean belum diisi di file form ini."); return; }
+      finBox("", "Memuat antrean...");
+      finJsonp({ page: "finnext", offset: finOffset }, function (res, err) {
+        if (err || !res || !res.ok) { finShowError("Gagal memuat antrean: " + (err || (res && res.error) || "?")); return; }
+        finInfo = res;
+        if (res.kosong) {
+          finCurrent = null;
+          document.getElementById("finCount").textContent = "";
+          finBox("finOk", res.total > 0 ? "Antrean habis (" + res.total + " entri selesai)." : "Antrean kosong. Kirim dulu dari aplikasi Gudangku.");
+          return;
+        }
+        finSetCurrent(res.entry, false);
+      });
+    }
+
+    function finSetField(id, v) { var el = document.getElementById(id); if (el) el.value = v; }
+
+    function finSetCurrent(entry, fromState) {
+      finCurrent = entry;
+      finMarked = false;
+      if (!fromState) {
+        finSetField("text1_id", entry.kode);
+        finSetField("number_id", entry.jumlah);
+        finSetField("date_id", entry.tgl);
+        finSetField("text2_id", entry.pic);
+        finSetField("text3_id", entry.ket);
+        try { _tecit_SetBarcode("barcode_id", entry.namaQr, "QR", null); } catch (e) {}
+      }
+      finRender();
+      setTimeout(finRender, 700);
+    }
+
+    function finBarcodeValue() {
+      try {
+        var j = _tecit_GetBarcodeDataAsJson("barcode_id");
+        if (j && j.value !== undefined) return String(j.value);
+      } catch (e) {}
+      return null;
+    }
+
+    function finRender() {
+      var body = document.getElementById("finBody");
+      var cnt = document.getElementById("finCount");
+      if (!finCurrent) return;
+      if (finInfo && finInfo.menunggu) cnt.textContent = "sisa " + finInfo.menunggu + " / " + finInfo.total;
+      body.innerHTML = "";
+      function baris(cls, t) { var d = document.createElement("div"); d.className = cls || ""; d.textContent = t; body.appendChild(d); }
+      baris("finNama", finCurrent.namaQr);
+      baris("", finCurrent.kode + "  \u2022  jumlah " + finCurrent.jumlah + "  \u2022  " + finCurrent.tgl);
+      baris("", "PIC: " + (finCurrent.pic || "-") + "  \u2022  " + (finCurrent.ket || "-"));
+      var bv = finBarcodeValue();
+      if (bv === null) baris("finWarn", "Pastikan kolom barcode berisi nama di atas.");
+      else if (finNorm(bv) === finNorm(finCurrent.namaQr)) baris("finOk", "Barcode terisi sesuai. Tekan kirim.");
+      else baris("finWarn", "Barcode belum terisi. Scan QR barang ini (bila tidak otomatis).");
+    }
+    setInterval(function () { if (finCurrent) finRender(); }, 2000);
+
+    function finMarkDone(cb) {
+      finJsonp({ page: "finselesai", uid: finCurrent.uid }, function (res, err) {
+        if (err || !res || !res.ok) cb(false, err || (res && res.error) || "?"); else cb(true);
+      });
+    }
+
+    function finAfterSubmit() {
+      finCurrent = null; finMarked = false; finOffset = 0;
+      finBox("finOk", "Terkirim. Menyiapkan entri berikutnya...");
+      setTimeout(function () { if (!finCurrent && finAutoOn()) finLoadNext(); }, 2000);
+    }
+
+    function finDetach() {
+      finCurrent = null; finMarked = false;
+      finBox("", "Antrean dilepas. Form dipakai manual.");
+    }
+    </script>
+    <script type="text/javascript">
+
+    var updatePromise;
+    var controlIdsToUpdate;
+
+    //----------------------------------------------------------
+    //  window.load
+    //----------------------------------------------------------
+    window.addEventListener("load", function() {
+      if (_tecit_GetPlatform() == "iOS")
+        _tecit_OnLoad(null);
+    });
+
+    //----------------------------------------------------------
+    //  _tecit_OnLoad
+    //----------------------------------------------------------
+    function _tecit_OnLoad(state) {
+      if (state) {
+        _tecit_RestoreState(state);
+      } else {
+        _tecit_UpdateDateAndTimeFields();
+        _tecit_UpdateLocations();
+        window.scrollTo(0,0);
+        _tecit_FocusFirstField();
+        finAutoLoad();
+      }
+    }
+
+    //----------------------------------------------------------
+    //  _tecit_OnLocationUpdate
+    //----------------------------------------------------------
+    function _tecit_OnLocationUpdate(id, latitude, longitude) {
+      if (!id) { // update all location fields if no id is given
+        var mapFrames = document.getElementsByClassName("mapFrame");
+        for (i = 0; i < mapFrames.length; ++i) {
+          _tecit_OnLocationUpdate(mapFrames[i].id, latitude, longitude);
+        }
+      }
+      else {
+        if (latitude && longitude) {
+          document.getElementById(id).src="https://www.google.com/maps/embed/v1/place?key="+MAPS_EMBED_API_KEY+"&q="+latitude+","+longitude;
+          _tecit_Locations[id] = latitude + ", " + longitude;
+        }
+        else {
+          document.getElementById(id).src="../api/locationError.html";
+        }
+
+        if (updatePromise) {
+          if (controlIdsToUpdate && controlIdsToUpdate.length > 0) {
+            var index = controlIdsToUpdate.indexOf(id);
+            if (index > -1) {
+              controlIdsToUpdate.splice(index, 1);
+              if (controlIdsToUpdate.length == 0) {
+                updatePromise.resolve();
+              }
+            }
+          }
+          else {
+            updatePromise.resolve();
+          }
+        }
+      }
+    }
+
+    //----------------------------------------------------------
+    //  _tecit_OnScanResult
+    //----------------------------------------------------------
+    function _tecit_OnScanResult(id, data, description, image) {
+      if (!id) {
+        _tecit_HandleBarcodeFromHardwareScanner(data, description, image);
+
+        // reset validation message
+        document.getElementById("validation_message_id").innerHTML="";
+        document.getElementById("validation_message_container_id").style.display="none";
+      }
+      else {
+        _tecit_SetBarcode(id, data, description, image);
+      }
+    }
+    
+    //----------------------------------------------------------
+    //  _tecit_OnTextRecognitionResult
+    //----------------------------------------------------------
+    function _tecit_OnTextRecognitionResult(id, text) {
+      if (id && text) {
+        document.getElementById(id).value = text;
+      }
+    }
+    
+    //----------------------------------------------------------
+    //  _tecit_OnReadNFCTagResult
+    //----------------------------------------------------------
+    function _tecit_OnReadNFCTagResult(id, text) {
+      if (id && text) {
+        var nfcField = document.getElementById(id);
+        if (nfcField) {
+          nfcField.value = text;
+          nfcField.disabled = true;
+        }
+        
+        var resetButton = document.getElementById("reset_"+id);
+        if (resetButton) {
+          resetButton.style.display = "inline-block";
+        }
+      }
+      _tecit_NFCButtonFinished(id);
+    }
+
+    //----------------------------------------------------------
+    //  _tecit_GetState
+    //----------------------------------------------------------
+    function _tecit_GetState() {
+      var json = inputToJson();
+      json.push(_tecit_GetBarcodePreviewAsJson("barcode_id"));
+      json.push({"type":"stateData","scrollTop":document.documentElement.scrollTop});
+      json.push({"type":"stateData","focusedField":_tecit_GetFocusedFieldId()});
+      json.push({"type":"stateData","finEntry":finCurrent});
+      return JSON.stringify(json);
+    }
+
+    //----------------------------------------------------------
+    //  _tecit_RestoreState
+    //----------------------------------------------------------
+    function _tecit_RestoreState(state) {
+      if (state) {
+        var json = JSON.parse(state);
+        jsonToInput(json);
+        _tecit_SetBarcodePreviewFromJson("barcode_id", json.shift());
+        var scrollTop = json.shift().scrollTop;
+        if (scrollTop)
+          document.documentElement.scrollTop = scrollTop;
+        var controlId = json.shift().focusedField;
+        var finState = json.shift();
+        if (finState && finState.finEntry) finSetCurrent(finState.finEntry, true);
+        if (controlId)
+          _tecit_FocusField(controlId);
+      }
+    }
+
+    //----------------------------------------------------------
+    //  inputIsValid
+    //----------------------------------------------------------
+    function inputIsValid() {
+      var message;
+
+      
+
+      // set validation message
+      if (message) {
+        document.getElementById("validation_message_id").innerHTML = message;
+        document.getElementById("validation_message_container_id").style.display="block";
+        return false;
+      } else {
+        document.getElementById("validation_message_id").innerHTML="";
+        document.getElementById("validation_message_container_id").style.display="none";
+        return true;
+      }
+    }
+
+    //----------------------------------------------------------
+    //  inputToJson
+    //----------------------------------------------------------
+    function inputToJson() {
+      var json = [];
+
+      json.push(_tecit_GetBarcodeDataAsJson("barcode_id"));
+      json.push({"type":"text/plain", "name":_tecit_GetFieldName("text1_id"), "value":document.getElementById("text1_id").value});
+      json.push({"type":"text/x.number", "name":_tecit_GetFieldName("number_id"), "value":document.getElementById("number_id").value});
+      json.push({"type":"text/x.time", "name":_tecit_GetFieldName("time_id"), "value":_tecit_LocaleToUTCDateString(document.getElementById("time_id").value)});
+      json.push({"type":"text/x.date", "name":_tecit_GetFieldName("date_id"), "value":_tecit_LocaleToUTCDateString(document.getElementById("date_id").value)});
+      json.push({"type":"text/plain", "name":_tecit_GetFieldName("text2_id"), "value":document.getElementById("text2_id").value});
+      json.push({"type":"text/plain", "name":_tecit_GetFieldName("text3_id"), "value":document.getElementById("text3_id").value});
+
+      return json;
+    }
+
+    //----------------------------------------------------------
+    //  jsonToInput
+    //----------------------------------------------------------
+    function jsonToInput(json) {
+      _tecit_SetBarcodeDataFromJson("barcode_id", json.shift());
+      document.getElementById("text1_id").value = json.shift().value;
+      document.getElementById("number_id").value = json.shift().value;
+      document.getElementById("time_id").value = _tecit_UTCToLocaleTimeString(json.shift().value);
+      document.getElementById("date_id").value = _tecit_UTCToLocaleDateString(json.shift().value);
+      document.getElementById("text2_id").value = json.shift().value;
+      document.getElementById("text3_id").value = json.shift().value;
+    }
+
+    //----------------------------------------------------------
+    //  jsonToSummary
+    //----------------------------------------------------------
+    function jsonToSummary(json) {
+      var text = [];
+
+      text.push(json[0].value || "<no barcode>");
+      text.push(json[1].value);
+      text.push(json[2].value);
+      text.push(json[3].value);
+      text.push(json[4].value);
+      text.push(json[5].value);
+      text.push(json[6].value);
+
+      return text.join(" | ");
+    }
+    
+    //----------------------------------------------------------
+    //  getSubmitOptions
+    //----------------------------------------------------------
+    function getSubmitOptions() {
+      return "{\"destination\":\"\"}";
+    }
+
+    
+
+    //----------------------------------------------------------
+    //  submit
+    //----------------------------------------------------------
+    function submit() {
+      if (inputIsValid() && (!(typeof(document.forms[0].reportValidity) === "function") || document.forms[0].reportValidity())) {
+        if (finCurrent) {
+          var bv = finBarcodeValue();
+          if (bv !== null && finNorm(bv) !== finNorm(finCurrent.namaQr)) {
+            finShowError('Barcode belum sesuai antrean. Scan QR "' + finCurrent.namaQr + '" atau tekan Lepas untuk input manual.');
+            isSending = false;
+            document.getElementById("sendButton").disabled = false;
+            return;
+          }
+          if (!finMarked) {
+            finMarkDone(function (ok, err) {
+              if (ok) { finMarked = true; submit(); }
+              else {
+                isSending = false;
+                document.getElementById("sendButton").disabled = false;
+                finShowError("Gagal mencatat progres (" + err + "). Cek koneksi lalu kirim lagi.");
+              }
+            });
+            return;
+          }
+        }
+        var json = inputToJson();
+        var summary = jsonToSummary(json);
+        var options = "submitOptions=" + getSubmitOptions();
+        
+        _tecit_Submit(JSON.stringify(json), summary, options);
+        finAfterSubmit();
+      }
+      else {
+        isSending = false;
+        document.getElementById("sendButton").disabled = false;
+      }
+    }
+    </script>
+  </head>
+  <body>
+    <div class="finPanel" id="finPanel">
+      <div class="finHead"><b>&#128230; Antrean Finance</b><span id="finCount"></span></div>
+      <div id="finBody">Belum dimuat.</div>
+      <div class="finBtns">
+        <button type="button" onclick="finOffset=0; finLoadNext();">Muat</button>
+        <button type="button" onclick="finOffset++; finLoadNext();">Lewati</button>
+        <button type="button" onclick="finDetach();">Lepas</button>
+      </div>
+      <label class="finAuto"><input type="checkbox" id="finAutoChk" onchange="finSetAuto(this.checked);"/> Muat otomatis setiap form baru</label>
+    </div>
+
+    <form action="javascript:_tecit_UpdateAndSubmit()">
+
+      <div class="section">
+        <div class="heading clearfix">
+          <h1 class="headingWithResetButton" id="heading_barcode_id"><img src="../img/barcode.svg"/> Nama Barang</h1>
+          <script>_tecit_CreateResetButtonForBarcodeControl("barcode_id");</script>
+        </div>
+        <div class="control clearfix" data-name="BARCODE">
+          <script>_tecit_CreateBarcodeControl("barcode_id", false);</script>
+        </div>
+      </div>
+      
+      <div class="section">
+        <div class="heading clearfix">
+          <h1><img src="../img/text.svg"/> JENIS</h1>
+        </div>
+        <div class="control clearfix" data-name="JENIS">
+          <div class="ocrControl clearfix">
+            <textarea rows="4" class="ocrInput " id="text1_id" data-separator="\n" data-text-search-enabled="false" data-text-search-regex-pattern="Lio=" data-text-search-regex-template="JDA=" data-text-search-match-per-element="false"></textarea>
+            <button type="button" class="ocrButton" id="text1_id_ocrButton" onClick="var data = document.getElementById('text1_id').dataset; _tecit_StartTextRecognition('text1_id', 'separator=&quot;'+data.separator+'&quot; textSearchEnabled=&quot;'+data.textSearchEnabled+'&quot; textSearchMatchPerElement=&quot;'+data.textSearchMatchPerElement+'&quot; textSearchRegexPattern=&quot;'+data.textSearchRegexPattern+'&quot; textSearchRegexTemplate=&quot;'+data.textSearchRegexTemplate+'&quot;');"><img src="../img/image.svg"/></button>
+          </div>
+        </div>
+      </div>
+      
+      <div class="section">
+        <div class="heading clearfix">
+          <h1><img src="../img/number.svg"/> KUANTITAS</h1>
+        </div>
+        <div class="control clearfix" data-name="KUANTITAS">
+          <input type="number" class="numberWithSteppers " id="number_id" value="" step="any" data-step="1" min="" max="" onkeypress="return (event.charCode >= 48 && event.charCode <= 57) || event.charCode == 13 || (event.charCode >= 44 && event.charCode <= 46)"/>
+          <div class="stepper">
+            <button type="button" class="decreaseButton" onmousedown="_tecit_BeforeQuantityChange(event)" onClick="_tecit_Decrease(event)">-</button>
+            <button type="button" class="increaseButton" onmousedown="_tecit_BeforeQuantityChange(event)" onClick="_tecit_Increase(event)">+</button>
+          </div>
+        </div>
+      </div>
+      
+      <div class="section">
+        <div class="heading clearfix">
+          <h1><img src="../img/time.svg"/> WAKTU</h1>
+        </div>
+        <div class="control" data-name="WAKTU">
+          <div class="controlWithButton clearfix">
+            <input type="time" class="timeField " id="time_id" step="1"/>
+            <button type="button" class="refreshButton" onClick="_tecit_UpdateDateAndTimeFields('time_id')"><img src="../img/refresh.svg"/></button>
+          </div>
+        </div>
+      </div>
+      
+      <div class="section">
+        <div class="heading clearfix">
+          <h1><img src="../img/date.svg"/> TANGGAL</h1>
+        </div>
+        <div class="control" data-name="TANGGAL">
+          <div class="controlWithButton clearfix">
+            <input type="date" class="dateField " id="date_id"/>
+            <button type="button" class="refreshButton" onClick="_tecit_UpdateDateAndTimeFields('date_id')"><img src="../img/refresh.svg"/></button>
+          </div>
+        </div>
+      </div>
+      
+      <div class="section">
+        <div class="heading clearfix">
+          <h1><img src="../img/text.svg"/> NAMA</h1>
+        </div>
+        <div class="control clearfix" data-name="NAMA">
+          <div class="ocrControl clearfix">
+            <textarea rows="4" class="ocrInput " id="text2_id" data-separator="\n" data-text-search-enabled="false" data-text-search-regex-pattern="Lio=" data-text-search-regex-template="JDA=" data-text-search-match-per-element="false"></textarea>
+            <button type="button" class="ocrButton" id="text2_id_ocrButton" onClick="var data = document.getElementById('text2_id').dataset; _tecit_StartTextRecognition('text2_id', 'separator=&quot;'+data.separator+'&quot; textSearchEnabled=&quot;'+data.textSearchEnabled+'&quot; textSearchMatchPerElement=&quot;'+data.textSearchMatchPerElement+'&quot; textSearchRegexPattern=&quot;'+data.textSearchRegexPattern+'&quot; textSearchRegexTemplate=&quot;'+data.textSearchRegexTemplate+'&quot;');"><img src="../img/image.svg"/></button>
+          </div>
+        </div>
+      </div>
+      
+      <div class="section">
+        <div class="heading clearfix">
+          <h1><img src="../img/text.svg"/> KETERANGAN</h1>
+        </div>
+        <div class="control clearfix" data-name="KETERANGAN">
+          <div class="ocrControl clearfix">
+            <textarea rows="4" class="ocrInput " id="text3_id" data-separator="\n" data-text-search-enabled="false" data-text-search-regex-pattern="Lio=" data-text-search-regex-template="JDA=" data-text-search-match-per-element="false"></textarea>
+            <button type="button" class="ocrButton" id="text3_id_ocrButton" onClick="var data = document.getElementById('text3_id').dataset; _tecit_StartTextRecognition('text3_id', 'separator=&quot;'+data.separator+'&quot; textSearchEnabled=&quot;'+data.textSearchEnabled+'&quot; textSearchMatchPerElement=&quot;'+data.textSearchMatchPerElement+'&quot; textSearchRegexPattern=&quot;'+data.textSearchRegexPattern+'&quot; textSearchRegexTemplate=&quot;'+data.textSearchRegexTemplate+'&quot;');"><img src="../img/image.svg"/></button>
+          </div>
+        </div>
+      </div>
+      
+
+      <div class="fixedSendButton">
+        <button type="submit" id="sendButton"><img src="../img/send.svg"/></button>
+      </div>
+
+      <div class="bottomSpacer"></div>
+    </form>
+    
+    <div class="compactModeButton">
+      <button type="button" class="compactModeButton" id="compactModeButton" onclick="_tecit_EnterCompactMode();"><img id="compactModeButtonImg" src="../img/compactMode.svg"/></button>
+    </div>
+
+    <div class="validationMessage" id="validation_message_container_id" onClick="document.getElementById('validation_message_container_id').style.display='none'">
+      <div>
+        <span class="msg" id="validation_message_id"></span>
+      </div>
+    </div>
+  </body>
+</html>
